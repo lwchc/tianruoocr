@@ -35,6 +35,27 @@ namespace TrOCR.Helper
         // 构造函数依然是私有的
         private PaddleOCRHelper()
         {
+            // --- 优化：在每次初始化时都重新声明DLL搜索路径 ---
+            var processArchitecture = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture;
+            if (processArchitecture == System.Runtime.InteropServices.Architecture.X64)
+            {
+                string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "PaddleOCR_data", "win_x64");
+                if (Directory.Exists(path))
+                {
+                    // TrOCRUtils.AddDllDirectory 是 Program.cs 中 AddDllDirectory 的包装器
+                    TrOCRUtils.AddDllDirectory(path);
+                }
+            }
+            else if (processArchitecture == System.Runtime.InteropServices.Architecture.X86)
+            {
+                string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "PaddleOCR_data", "win_x86");
+                if (Directory.Exists(path))
+                {
+                    TrOCRUtils.AddDllDirectory(path);
+                }
+            }
+            // --- 优化结束 ---
+
             _architecture = RuntimeInformation.ProcessArchitecture ;
 
             if (_architecture != Architecture.X64)
@@ -107,8 +128,11 @@ namespace TrOCR.Helper
             {
                 // 初始化失败时，确保 _engine 为 null，以便 Execute 方法能正确报告错误。
                 _engine = null;
-                
-                throw new Exception($"PaddleOCR引擎初始化失败: {ex.Message}");
+
+                //throw new Exception($"PaddleOCR引擎初始化失败: {ex.Message}");
+                // 直接 "throw;" 会保留原始异常的完整堆栈信息
+                Debug.WriteLine($"[PaddleOCRHelper] InitializeEngine 失败: {ex}"); // 增加日志
+                throw;
             }
         }
 
@@ -138,9 +162,9 @@ namespace TrOCR.Helper
                 // 关键：捕获初始化或执行期间的任何异常
                 // 调用 Reset() 来清除“中毒”的 Lazy 实例
                 Reset();
-                // 返回一个对用户友好的错误信息
-                // ex.Message 会包含来自构造函数的具体错误，如 "PaddleOCR引擎初始化失败: ..."
-                return $"***PaddleOCR识别失败: {ex.Message}***";
+                // 关键：使用 ex.ToString() 来包含完整的堆栈信息
+                Debug.WriteLine($"[PaddleOCRHelper] RecognizeText 失败: {ex}"); // 增加日志
+                return $"***PaddleOCR识别失败: {ex.ToString()}***";
             }
         }
       

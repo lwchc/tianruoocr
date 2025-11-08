@@ -69,7 +69,8 @@ namespace TrOCR
 
 		private bool isProgrammaticResize = false; // 用于屏蔽Form_Resize事件的标志位
 
-
+	    // 【新增】用于手动计算托盘点击次数的计数器
+    	private int trayClickCount = 0;
 
 
 
@@ -392,6 +393,21 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 			}
 			if (m.Msg == 786 && m.WParam.ToInt32() == 590 && speak_copyb == "朗读")
 			{
+				if (ActiveControl.Name == "htmlTextBoxBody")
+				{
+					//优先使用选中的文本；如果未选中任何文本，则使用全部文本
+    				htmltxt = !string.IsNullOrEmpty(RichBoxBody.SelectText) 
+              		? RichBoxBody.SelectText 
+              		: RichBoxBody.Text;
+				}
+				if (ActiveControl.Name == "rich_trans")
+				{
+					htmltxt = RichBoxBody_T.Text;
+				}
+				if (htmltxt == "")
+				{
+					return;
+				}
 				TTS();
 				return;
 			}
@@ -433,7 +449,10 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 			{
 				if (ActiveControl.Name == "htmlTextBoxBody")
 				{
-					htmltxt = RichBoxBody.Text;
+					//优先使用选中的文本；如果未选中任何文本，则使用全部文本
+    				htmltxt = !string.IsNullOrEmpty(RichBoxBody.SelectText) 
+              		? RichBoxBody.SelectText 
+              		: RichBoxBody.Text;
 				}
 				if (ActiveControl.Name == "rich_trans")
 				{
@@ -976,8 +995,16 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 					{
 						if (!string.IsNullOrEmpty(textToDisplay))
 						{
-							// 直接调用新的统一方法
-							string finalText = PerformIntelligentMerge(textToDisplay, StaticValue.IsMergeRemoveSpace);
+							string finalText;
+                            if (StaticValue.IsMergeRemoveAllSpace)
+                            {
+                                finalText = Regex.Replace(textToDisplay, @"[\r\n 　]+", "");
+                            }
+							else
+                            {
+                                // 只有在“非移除所有空格”模式下，才调用原来的智能合并方法
+                                finalText = PerformIntelligentMerge(textToDisplay, StaticValue.IsMergeRemoveSpace);
+                            }
 							textToDisplay = finalText;
 
 							// 应用“合并后自动复制”设置
@@ -1061,7 +1088,8 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 		/// <param name="e">事件参数</param>
 		private void trayShowClick(object sender, EventArgs e)
 		{
-			Show();
+			Debug.WriteLine("托盘菜单点击了显示主窗口");
+            Show();
 			Activate();
 			Visible = true;
 			WindowState = FormWindowState.Normal;
@@ -3292,35 +3320,71 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 		/// </summary>
 		public void TTS_thread()
 		{
-			try
-			{
-				// 清理文本内容，移除特殊标记
-				var text = htmltxt.Replace("***", "");
-				// 检测文本语言
-				var lang = CommonHelper.LangDetect(text);
-				//                var url = "https://fanyi.baidu.com/gettts?lan=" + lang + "&text=" + HttpUtility.UrlEncode(text) +
-				//                                   "&vol=9&per=0&spd=6&pit=4&source=web&ctp=1";
-				// 获取百度TTS语音合成URL
-				var url = TranslateHelper.BdTts(text, lang, 5);
-				// 下载语音数据
-				ttsData = new WebClient().DownloadData(url);
-				// 根据条件决定调用哪个播放方法
-				if (speak_copyb == "朗读" || voice_count == 0)
-				{
-					Invoke(new Translate(Speak_child));
-					speak_copyb = "";
-				}
-				else
-				{
-					Invoke(new Translate(TTS_child));
-				}
-				voice_count++;
-			}
-			catch (Exception)
-			{
-				MessageBox.Show("文本过长，请使用右键菜单中的选中朗读！", "提醒");
-			}
-		}
+            try
+            {
+                // 1. === 获取 Token (使用 using 自动释放) ===
+                string text;
+                HttpWebRequest tokenRequest = (HttpWebRequest)WebRequest.Create(string.Format("{0}?{1}", "http://aip.baidubce.com/oauth/2.0/token", "grant_type=client_credentials&client_id=iQekhH39WqHoxur5ss59GpU4&client_secret=8bcee1cee76ed60cdfaed1f2c038584d"));
+
+                using (HttpWebResponse tokenResponse = (HttpWebResponse)tokenRequest.GetResponse())
+                using (Stream responseStream = tokenResponse.GetResponseStream())
+                using (StreamReader streamReader = new StreamReader(responseStream, Encoding.GetEncoding("utf-8")))
+                {
+                    text = streamReader.ReadToEnd();
+                }
+                // <--- 在这里，tokenResponse, responseStream, 和 streamReader 已被自动关闭和释放
+
+                string text2 = !contain_ch(htmltxt) ? "zh" : "zh";
+
+                // 2. === 构建 TTS 请求 ===
+                HttpWebRequest httpWebRequest = (HttpWebRequest)WebRequest.Create(string.Concat(new string[]
+                {
+            		"http://tsn.baidu.com/text2audio?lan=" + text2 + "&ctp=1&cuid=abcdxxx&tok=",
+            		((JObject)JsonConvert.DeserializeObject(text))["access_token"].ToString(),
+            		"&tex=",
+            		HttpUtility.UrlEncode(htmltxt.Replace("***", "")),
+            		"&vol=9&per=0&spd=5&pit=5"
+                }));
+                httpWebRequest.Method = "POST";
+
+                byte[] array2;
+
+                // 3. === 获取音频流 (使用 using 自动释放) ===
+                // 修复了原版代码在 while 循环中重复调用 GetResponseStream() 的 Bug
+                using (HttpWebResponse httpWebResponse = (HttpWebResponse)httpWebRequest.GetResponse())
+                using (Stream audioStream = httpWebResponse.GetResponseStream()) // <-- 只调用一次
+                using (MemoryStream memoryStream = new MemoryStream())
+                {
+                    byte[] array = new byte[16384];
+                    int num;
+                    while ((num = audioStream.Read(array, 0, array.Length)) > 0)
+                    {
+                        memoryStream.Write(array, 0, num);
+                    }
+                    array2 = memoryStream.ToArray();
+                }
+                // <--- 在这里，httpWebResponse, audioStream, 和 memoryStream 已被自动关闭和释放
+
+                ttsData = array2;
+                if (speak_copyb == "朗读" || voice_count == 0)
+                {
+                    Invoke(new Translate(Speak_child));
+                    speak_copyb = "";
+                }
+                else
+                {
+                    Invoke(new Translate(TTS_child));
+                }
+                voice_count++;
+            }
+            catch (Exception ex)
+            {
+                if (ex.ToString().IndexOf("Null") <= -1)
+                {
+                    MessageBox.Show("文本过长，请使用右键菜单中的选中朗读！", "提醒");
+                }
+            }
+        }
 
 		/// <summary>
 		/// TTS文本朗读播放函数，在UI线程中执行，负责播放已下载的语音数据
@@ -4424,8 +4488,15 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 			else if (bool.Parse(IniHelper.GetValue("工具栏", "合并")) || set_merge)
 			{
 				set_merge = false;
-        		// 直接调用新的统一方法，并传入相应的设置
-    			finalTextToShow = PerformIntelligentMerge(text, StaticValue.IsMergeRemoveSpace);
+				if (StaticValue.IsMergeRemoveAllSpace)
+                {
+                    finalTextToShow = Regex.Replace(text, @"[\r\n 　]+", "");
+                }
+                else
+                {
+        		    // 只有在“非移除所有空格”模式下，才调用原来的智能合并方法
+    			    finalTextToShow = PerformIntelligentMerge(text, StaticValue.IsMergeRemoveSpace);
+                }
     			
 			}
 
@@ -4444,11 +4515,40 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 					fmNote.TextNote = "";
 				}
 			}
+            //处理无弹窗配置
+            if (IniHelper.GetValue("配置", "识别弹窗") == "False")
+            {
+                FormBorderStyle = FormBorderStyle.Sizable;
+                // Size = new Size((int)font_base.Width * 23, (int)font_base.Height * 24);
+                this.Size = this.lastNormalSize;
+                Visible = false;
+				RichBoxBody.Text = finalTextToShow;
+                if (RichBoxBody.Text != "***该区域未发现文本***" && !string.IsNullOrWhiteSpace(RichBoxBody.Text))
+                {
+                    SetClipboardWithLock(RichBoxBody.Text);
 
-			// --- 步骤 2: 集中进行所有UI更新 ---
+                    Debug.WriteLine("无弹窗模式复制识别结果成功");
+                    CommonHelper.ShowHelpMsg("已识别并复制");
+                }
+                else
+                {
+                    CommonHelper.ShowHelpMsg("无文本");
+                }
+                if (IniHelper.GetValue("快捷键", "翻译文本") != "请按下快捷键")
+                {
+                    var value2 = IniHelper.GetValue("快捷键", "翻译文本");
+                    var text4 = "None";
+                    var text5 = "F9";
+                    SetHotkey(text4, text5, value2, 205);
+                }
+                HelpWin32.UnregisterHotKey(Handle, 222);
+                return;
+            }
 
-			// a. 先让窗口框架稳定
-			Text = "耗时：" + str;
+            // --- 步骤 2: 集中进行所有UI更新 ---
+
+            // a. 先让窗口框架稳定
+            Text = "耗时：" + str;
 			FormBorderStyle = FormBorderStyle.Sizable;
             // 在设置尺寸之前记录一次，这是看到 Bug 的关键
             System.Diagnostics.Debug.WriteLine("Main_OCR_Thread_last: About to set final size.");
@@ -4629,34 +4729,7 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 				HelpWin32.UnregisterHotKey(Handle, 222);
 				return;
 			}
-			//处理无弹窗配置
-			if (IniHelper.GetValue("配置", "识别弹窗") == "False")
-			{ 
-				FormBorderStyle = FormBorderStyle.Sizable;
-				// Size = new Size((int)font_base.Width * 23, (int)font_base.Height * 24);
-				this.Size = this.lastNormalSize;
-				Visible = false;
-				if (RichBoxBody.Text != "***该区域未发现文本***" && !string.IsNullOrWhiteSpace(RichBoxBody.Text))
-				{
-					SetClipboardWithLock(RichBoxBody.Text);
-					
-					Debug.WriteLine("无弹窗模式复制识别结果成功");
-					CommonHelper.ShowHelpMsg("已识别并复制");
-				}
-				else
-				{
-					CommonHelper.ShowHelpMsg("无文本");
-				}
-				if (IniHelper.GetValue("快捷键", "翻译文本") != "请按下快捷键")
-				{
-					var value2 = IniHelper.GetValue("快捷键", "翻译文本");
-					var text4 = "None";
-					var text5 = "F9";
-					SetHotkey(text4, text5, value2, 205);
-				}
-				HelpWin32.UnregisterHotKey(Handle, 222);
-				return;
-			}
+		
 			// 处理识别后自动翻译功能
 			if (autoTranslate)
 			{
@@ -7047,14 +7120,62 @@ private void RichBoxBody_T_OnTemporaryTranslateRequested(object sender, TempTran
 		/// </summary>
 		/// <param name="sender">事件发送者</param>
 		/// <param name="e">事件参数</param>
-		private void tray_double_Click(object sender, EventArgs e)
+		/// <summary>
+		/// 【新增】托盘图标鼠标按下事件
+		/// </summary>
+		private void tray_MouseDown(object sender, MouseEventArgs e)
 		{
-			HelpWin32.UnregisterHotKey(Handle, 205);
-			menu.Hide();
-			RichBoxBody.Hide = "";
-			RichBoxBody_T.Hide = "";
-			MainOCRQuickScreenShots();
+			if (e.Button == MouseButtons.Left)
+			{
+				// 每当左键按下，计数器加 1
+				trayClickCount++;
+
+				if (trayClickCount == 1)
+				{
+					// 如果这是第一次点击，启动定时器
+					// 定时器将等待系统双击那么长的时间
+					trayClickTimer.Start();
+				}
+			}
 		}
+	/// <summary>
+    /// 【修改】定时器触发事件：检查时间窗口内的总点击次数
+    /// </summary>
+    private void trayClickTimer_Tick(object sender, EventArgs e)
+    {
+        // 1. 定时器到期，立即停止
+        trayClickTimer.Stop();
+
+        // 2. 检查在时间窗口内总共发生了几次点击
+        if (trayClickCount == 1)
+        {
+            // 如果只有 1 次点击，判定为“单击”，执行“切换显示/隐藏”
+				if (this.Visible)
+				{
+					// 如果窗口当前可见，则隐藏它
+					this.Hide();
+					this.Visible = false;
+				}
+				else
+				{
+					// 如果窗口当前不可见，则调用 trayShowClick (它会负责 Show, Activate, TopMost 等)
+					trayShowClick(sender, e);
+				}
+        }
+        else if (trayClickCount >= 2)
+        {
+            // 如果有 2 次或更多点击，判定为“双击”
+            // (这里我们执行原 tray_double_Click 的逻辑)
+            HelpWin32.UnregisterHotKey(Handle, 205);
+            menu.Hide();
+            RichBoxBody.Hide = "";
+            RichBoxBody_T.Hide = "";
+            MainOCRQuickScreenShots();
+        }
+
+        // 3. 无论结果如何，重置计数器
+        trayClickCount = 0;
+    }
 
 		/// <summary>
 		/// 统计文本中的英文单词数量
